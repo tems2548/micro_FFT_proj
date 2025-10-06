@@ -3,15 +3,26 @@ import numpy as np
 import matplotlib.pyplot as plt
 import serial
 import heapq
+import psutil  # For CPU usage 
 
 ser = serial.Serial("/dev/ttyUSB0",115200)
 fs = 4000
-N = 128
+N = 256
 plt.ion()
 fig, axs = plt.subplots(3)
 
+def get_cpu_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            temp_str = f.readline()
+            return float(temp_str) / 1000.0  # Convert millidegree to degree
+    except:
+        return 0.0  # fallback in case of error
 
 while True:
+    cpu_temp = get_cpu_temp()
+	# --- Start timing ---
+    loop_start_time = time.time()
     #FFT
     data = []
     for _ in range(N):
@@ -58,13 +69,19 @@ while True:
         axs[1].clear()
         axs[2].clear()
         
+        axs[0].axvspan(20, 250, color='blue', alpha=0.1)  # Bass
+        axs[0].axvspan(250, 2000, color='green', alpha=0.1)  # Mid
+        axs[0].axvspan(2000, 8000, color='red', alpha=0.1)  # Treble
+        
+        #axs[0].set_xscale('log')
+        #axs[1].set_xscale('log')
         
         #From nyquist 
         axs[0].set_xlim((0,fs/2))
         axs[1].set_xlim((0,fs/2))
         
         
-        axs[0].plot(freqs[:N//2],20*np.log10(mag)) 
+        axs[0].plot(freqs[:N//2],20*np.log10(mag+1e-6)) 
         axs[0].set_ylim((-80,80))
         axs[0].set_xlabel("frequecy [HZ]")
         axs[0].set_ylabel("Decibel [dB]")
@@ -72,8 +89,8 @@ while True:
         
         #show largest and 2nd largest data 
         
-        dB_max_main = 20*np.log10(main_peak_mag)
-        dB_max_second = 20*np.log10(second_peak_mag)
+        dB_max_main = 20*np.log10(main_peak_mag+1e-6)
+        dB_max_second = 20*np.log10(second_peak_mag+1e-6)
         
         axs[0].scatter(main_peak_freq,dB_max_main,color="red",s=20,label=f"1st largest = {dB_max_main:.2f} dB / {main_peak_freq:.2f} Hz")
         axs[0].text(main_peak_freq,dB_max_main,f"{dB_max_main:.2f}",color = "red",va="bottom")
@@ -83,7 +100,7 @@ while True:
         
         axs[0].legend()
         
-        dB_max_y = 20*np.log10(max_y)
+        dB_max_y = 20*np.log10(max_y+1e-6)
         bbox_prop = dict(boxstyle = "square,pad = 0.3 ",fc ="w",ec="k",lw=0.72)
         arrowprops = dict(arrowstyle = "->",connectionstyle="angle,angleA=0,angleB=60")
         kw = dict(xycoords = 'data',textcoords = "axes fraction",
@@ -105,7 +122,6 @@ while True:
         
         axs[1].scatter(second_peak_freq,second_peak_mag,color="black",s=20,label=f"2nd largest = {second_peak_mag:.2f} V / {second_peak_freq:.2f} Hz ")
         axs[1].text(second_peak_freq,second_peak_mag,f"{second_peak_mag:.2f}",color = "black",va="bottom")
-        
         axs[1].legend()
         
         history = np.zeros((100, N//2))  # e.g., last 100 FFT frames
@@ -113,9 +129,20 @@ while True:
         history[-1, :] = 20*np.log10(mag+1e-6)
         img = axs[2].imshow(history.T, aspect='auto', origin='lower',
 					  extent=[0, 100, 0, fs/2], cmap='viridis',vmin = -100,vmax=0)
+        loop_end_time = time.time()
+        fps = 1.0 / (loop_end_time - loop_start_time + 1e-6)  # Add epsilon to avoid div by 0
+        # Optional: Get current CPU usage
+        cpu_usage = psutil.cpu_percent(interval=0.01)
+        axs[0].text(0.98, 0.02,
+            f'FPS: {fps:.1f}\nCPU: {cpu_usage:.1f}%\nTemp: {cpu_temp:.1f}°C',
+            transform=axs[0].transAxes,
+            ha='right', va='bottom',
+            fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+
+					  
+					  
+			  
         plt.pause(0.001)
 
         
-    
-            
-    
