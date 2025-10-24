@@ -15,6 +15,7 @@ HISTORY_LEN = 100
 TRACK_LEN = 200
 FRAME_SIZE = 2 + N*2
 MIN_FREQ = 5.0
+EXCLUDE_BINS = 5  # exclude ±5 bins around main peak for 2nd peak
 
 # ----------------- Serial -----------------
 ser = serial.Serial(PORT, BAUD, timeout=0.05)
@@ -45,6 +46,16 @@ def smooth(data, w=5):
         return data
     return np.convolve(data, np.ones(w)/w, mode='same')
 
+def parabolic_interpolation(mag_db, idx, df):
+    """Return interpolated peak frequency using a parabola."""
+    if idx <= 0 or idx >= len(mag_db)-1:
+        return 0.0
+    alpha = mag_db[idx-1]
+    beta = mag_db[idx]
+    gamma = mag_db[idx+1]
+    correction = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma)
+    return correction * df
+
 def find_main_and_secondary_freq(volt):
     volt = volt - np.mean(volt)
     fft_vals = np.fft.rfft(volt * np.hanning(N))
@@ -57,30 +68,32 @@ def find_main_and_secondary_freq(volt):
     mag_valid = mag[mask]
     freq_axis_valid = freq_axis[mask]
 
-    # Sort by magnitude (find top 2 peaks)
-    top_indices = np.argpartition(mag_db_valid, -2)[-2:]
-    sorted_peaks = top_indices[np.argsort(mag_db_valid[top_indices])[::-1]]
+    df = FS / N  # FFT bin width
 
-    main_idx = sorted_peaks[0]
-    second_idx = sorted_peaks[1] if len(sorted_peaks) > 1 else main_idx
-
-    main_freq = freq_axis_valid[main_idx]
+    # --- Main peak ---
+    main_idx = np.argmax(mag_db_valid)
+    correction = parabolic_interpolation(mag_db_valid, main_idx, df)
+    main_freq = freq_axis_valid[main_idx] + correction
     main_amp = mag_valid[main_idx]
+
+    # --- Exclude main ±EXCLUDE_BINS for 2nd peak ---
+    mag_copy = mag_db_valid.copy()
+    start = max(main_idx - EXCLUDE_BINS, 0)
+    end = min(main_idx + EXCLUDE_BINS + 1, len(mag_copy))
+    mag_copy[start:end] = -np.inf
+    second_idx = np.argmax(mag_copy)
     second_freq = freq_axis_valid[second_idx]
     second_amp = mag_valid[second_idx]
 
+    # RMS, THD, SNR
     rms = np.sqrt(np.mean(volt**2))
-
-    # Harmonics and THD
     harmonic_mags = []
-    for h in [2, 3, 4]:
+    for h in [2,3,4]:
         target = h * main_freq
         if target < FS/2:
             idx = np.argmin(np.abs(freq_axis_valid - target))
             harmonic_mags.append(mag_valid[idx])
     thd = np.sqrt(np.sum(np.array(harmonic_mags)**2)) / main_amp if harmonic_mags else 0.0
-
-    # SNR in dB
     snr_db = 20 * np.log10(main_amp / (second_amp + 1e-12))
 
     return freq_axis, mag_db, main_freq, main_amp, second_freq, second_amp, rms, thd, snr_db
@@ -143,7 +156,7 @@ while True:
         ax_track.set_xlim(time_history[0], time_history[-1])
         ax_track.set_ylim(0, FS/2)
 
-        # --- Text info panel with colored background & dynamic highlighting ---
+        # --- Text info panel ---
         ax_text.cla()
         ax_text.axis("off")
         bg = plt.Rectangle((0,0),1,1, transform=ax_text.transAxes, color='lightyellow', alpha=0.5)
@@ -153,7 +166,7 @@ while True:
         snr_color = 'orange' if snr_db < 20 else 'darkblue'
 
         info_text = (
-            f"Main Frequency: {main_freq:.2f} Hz\n"
+            f"Main Frequency: {main_freq:.4f} Hz\n"
             f"Second Frequency (Noise): {second_freq:.2f} Hz\n"
             f"Amplitude: {main_amp:.4f} V\n"
             f"RMS: {rms:.4f} V\n"
