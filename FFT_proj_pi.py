@@ -1,148 +1,124 @@
-import time
+import serial
 import numpy as np
 import matplotlib.pyplot as plt
-import serial
-import heapq
-import psutil  # For CPU usage 
+from collections import deque
+import psutil, time, os
 
-ser = serial.Serial("/dev/ttyUSB0",115200)
-fs = 4000
-N = 256
+# ----------------- Settings -----------------
+PORT = "/dev/ttyACM0"          # Change to your ESP32 port
+BAUD = 1000000
+N = 1024
+HEADER = b'\xCD\xAB'
+VREF = 3.3
+FS = 18860.0                   # default constant sampling frequency
+HISTORY_LEN = 100
+FRAME_SIZE = 2 + N*2           # HEADER + ADC
+
+# ----------------- Serial -----------------
+ser = serial.Serial(PORT, BAUD, timeout=0.05)
+
+# ----------------- Plot -----------------
 plt.ion()
-fig, axs = plt.subplots(3)
+fig, axes = plt.subplots(3, 1, figsize=(10, 9), constrained_layout=True)
+ax_time, ax_fft, ax_spec = axes
+
+spec_history = deque(np.zeros(N//2), maxlen=HISTORY_LEN)
+prev_time = time.time()
+frame_count = 0
+fps_display = 0
 
 def get_cpu_temp():
+    """Read CPU temperature (Raspberry Pi or Linux)."""
     try:
-        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-            temp_str = f.readline()
-            return float(temp_str) / 1000.0  # Convert millidegree to degree
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return float(f.read()) / 1000.0
     except:
-        return 0.0  # fallback in case of error
+        return np.nan
 
 while True:
-    cpu_temp = get_cpu_temp()
-	# --- Start timing ---
-    loop_start_time = time.time()
-    #FFT
-    data = []
-    for _ in range(N):
-        line = ser.readline().decode().strip()
-        if line.isdigit():
-            data.append(int(line)/1000)
-    if len(data) == N:
-	    #FFT
-        fft_vals = np.fft.fft(data)
-       
-        freqs = np.fft.fftfreq(N,1/fs)
-        mag = np.abs(fft_vals[:N//2])*(2.0 / N)
-       
-       
-        #find max-min
-        max_fft_value = np.argmax(mag)
-        #find max-min locate 
-        max_x,max_y = freqs[max_fft_value],mag[max_fft_value]
-        
-        #find second largest 
-        #skip interval 
-        start_index = 10
-        freqs2 = freqs[start_index:]
-        mag2 = mag[start_index:]
-        
-        mag_copy = mag2.copy()
-        #sorted
-        sorted_indic = np.argsort(mag2)[::-1]
-        
-        #find main peak index
-        main_peak_index = sorted_indic[0] + start_index
-        
-        #Exclude ±exclude_bins around this main peak
-        exclude_bins = 15
-        mag_copy[max(0, main_peak_index - exclude_bins) : min(len(mag_copy), main_peak_index + exclude_bins + 1)] = 0
-        #Find 2nd peak index
-        sorted_indic_fil = np.argsort(mag_copy)[::-1]
-        second_peak_index = sorted_indic_fil[0] + start_index
-        
-        main_peak_freq, main_peak_mag = freqs[main_peak_index], mag[main_peak_index]
-        second_peak_freq, second_peak_mag = freqs[second_peak_index], mag[second_peak_index]
-       
-        axs[0].clear()
-        axs[1].clear()
-        axs[2].clear()
-        
-        axs[0].axvspan(20, 250, color='blue', alpha=0.1)  # Bass
-        axs[0].axvspan(250, 2000, color='green', alpha=0.1)  # Mid
-        axs[0].axvspan(2000, 8000, color='red', alpha=0.1)  # Treble
-        
-        #axs[0].set_xscale('log')
-        #axs[1].set_xscale('log')
-        
-        #From nyquist 
-        axs[0].set_xlim((0,fs/2))
-        axs[1].set_xlim((0,fs/2))
-        
-        
-        axs[0].plot(freqs[:N//2],20*np.log10(mag+1e-6)) 
-        axs[0].set_ylim((-80,80))
-        axs[0].set_xlabel("frequecy [HZ]")
-        axs[0].set_ylabel("Decibel [dB]")
-        axs[0].grid(True)
-        
-        #show largest and 2nd largest data 
-        
-        dB_max_main = 20*np.log10(main_peak_mag+1e-6)
-        dB_max_second = 20*np.log10(second_peak_mag+1e-6)
-        
-        axs[0].scatter(main_peak_freq,dB_max_main,color="red",s=20,label=f"1st largest = {dB_max_main:.2f} dB / {main_peak_freq:.2f} Hz")
-        axs[0].text(main_peak_freq,dB_max_main,f"{dB_max_main:.2f}",color = "red",va="bottom")
-        
-        axs[0].scatter(second_peak_freq,dB_max_second,color="black",s=20,label=f"2nd largest = {dB_max_second:.2f} dB / {second_peak_freq:.2f} Hz")
-        axs[0].text(second_peak_freq,dB_max_second,f"{dB_max_second:.2f}",color = "black",va="bottom")
-        
-        axs[0].legend()
-        
-        dB_max_y = 20*np.log10(max_y+1e-6)
-        bbox_prop = dict(boxstyle = "square,pad = 0.3 ",fc ="w",ec="k",lw=0.72)
-        arrowprops = dict(arrowstyle = "->",connectionstyle="angle,angleA=0,angleB=60")
-        kw = dict(xycoords = 'data',textcoords = "axes fraction",
-				  arrowprops = arrowprops,bbox = bbox_prop,ha="right",va="top") 
-        axs[0].annotate(f'max :{dB_max_y:.2f}',xy = (max_x,dB_max_y)
-					   ,xytext=(0.3,0.8),**kw)
-        
-        
-        
-        
-        axs[1].plot(freqs[:N//2],mag)
-        axs[1].set_ylim((0,1))
-        axs[1].set_xlabel("frequecy [HZ]")
-        axs[1].set_ylabel("Volt [V]")
-        axs[1].grid(True)
-        
-        axs[1].scatter(main_peak_freq,main_peak_mag,color="red",s=20,label=f"1st largest = {main_peak_mag:.2f} V / {main_peak_freq:.2f} Hz")
-        axs[1].text(main_peak_freq,main_peak_mag,f"{main_peak_mag:.2f}",color = "red",va="bottom")
-        
-        axs[1].scatter(second_peak_freq,second_peak_mag,color="black",s=20,label=f"2nd largest = {second_peak_mag:.2f} V / {second_peak_freq:.2f} Hz ")
-        axs[1].text(second_peak_freq,second_peak_mag,f"{second_peak_mag:.2f}",color = "black",va="bottom")
-        axs[1].legend()
-        
-        history = np.zeros((100, N//2))  # e.g., last 100 FFT frames
-        history = np.roll(history, -1, axis=0)
-        history[-1, :] = 20*np.log10(mag+1e-6)
-        img = axs[2].imshow(history.T, aspect='auto', origin='lower',
-					  extent=[0, 100, 0, fs/2], cmap='viridis',vmin = -100,vmax=0)
-        loop_end_time = time.time()
-        fps = 1.0 / (loop_end_time - loop_start_time + 1e-6)  # Add epsilon to avoid div by 0
-        # Optional: Get current CPU usage
-        cpu_usage = psutil.cpu_percent(interval=0.01)
-        axs[0].text(0.98, 0.02,
-            f'FPS: {fps:.1f}\nCPU: {cpu_usage:.1f}%\nTemp: {cpu_temp:.1f}°C',
-            transform=axs[0].transAxes,
-            ha='right', va='bottom',
-            fontsize=9,
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+    try:
+        start_frame = time.time()
+        frame = ser.read(FRAME_SIZE)
+        if len(frame) != FRAME_SIZE or frame[0:2] != HEADER:
+            continue
 
-					  
-					  
-			  
+        # --- ADC to voltage ---
+        adc_vals = np.frombuffer(frame[2:], dtype=np.uint16)
+        volt = adc_vals * VREF / 4095.0
+
+        # --- Time-domain plot ---
+        ax_time.cla()
+        ax_time.plot(np.arange(N)/FS, volt, color='black')
+        ax_time.set_xlabel("Time [s]")
+        ax_time.set_ylabel("Voltage [V]")
+        ax_time.set_title("Time Domain Signal")
+        ax_time.grid(True)
+
+        # --- FFT in dB ---
+        fft_vals = np.fft.rfft(volt * np.hanning(N))  # windowed FFT
+        mag = np.abs(fft_vals) * 2 / N
+        mag_db = 20 * np.log10(mag + 1e-12)
+        freq_axis = np.fft.rfftfreq(N, 1/FS)
+
+        ax_fft.cla()
+        ax_fft.plot(freq_axis, mag_db, color='purple')
+        ax_fft.set_xlabel("Frequency [Hz]")
+        ax_fft.set_ylabel("Magnitude [dB]")
+        ax_fft.set_title("FFT Spectrum (in dB)")
+        ax_fft.grid(True)
+
+        # --- Find 2nd & 3rd largest peaks ---
+        sorted_indices = np.argsort(mag_db)[::-1]
+        exclude_bins = 5
+        main_idx = sorted_indices[0]
+        mag_copy = mag_db.copy()
+        mag_copy[max(0, main_idx-exclude_bins):main_idx+exclude_bins+1] = -np.inf
+        second_idx = np.argmax(mag_copy)
+        mag_copy[max(0, second_idx-exclude_bins):second_idx+exclude_bins+1] = -np.inf
+        third_idx = np.argmax(mag_copy)
+
+        # --- Mark peaks on FFT ---
+        ax_fft.scatter(freq_axis[second_idx], mag_db[second_idx], color='red', s=60, zorder=3)
+        ax_fft.text(freq_axis[second_idx], mag_db[second_idx],
+                    f"2nd: {freq_axis[second_idx]:.1f} Hz\n{mag_db[second_idx]:.1f} dB",
+                    color='red', fontsize=9)
+        ax_fft.scatter(freq_axis[third_idx], mag_db[third_idx], color='blue', s=60, zorder=3)
+        ax_fft.text(freq_axis[third_idx], mag_db[third_idx],
+                    f"3rd: {freq_axis[third_idx]:.1f} Hz\n{mag_db[third_idx]:.1f} dB",
+                    color='blue', fontsize=9)
+
+        # --- Spectrogram ---
+        spec_history.append(mag_db[:N//2])
+        spec_array = np.array(spec_history).T
+
+        ax_spec.cla()
+        im = ax_spec.imshow(spec_array, aspect='auto', origin='lower',
+                            extent=[0, HISTORY_LEN, 0, FS/2],
+                            cmap='inferno', vmin=-100, vmax=0)
+        ax_spec.set_xlabel("Frame Index")
+        ax_spec.set_ylabel("Frequency [Hz]")
+        ax_spec.set_title("Spectrogram (dB)")
+        ax_spec.grid(False)
+
+        # --- Highlight current 2nd & 3rd peaks ---
+        ax_spec.axhline(freq_axis[second_idx], color='red', lw=1.5, linestyle='--')
+        ax_spec.axhline(freq_axis[third_idx], color='blue', lw=1.5, linestyle='--')
+
+        # --- FPS + CPU temperature ---
+        frame_count += 1
+        if time.time() - prev_time >= 1.0:
+            fps_display = frame_count / (time.time() - prev_time)
+            cpu_temp = get_cpu_temp()
+            prev_time = time.time()
+            frame_count = 0
+            print(f"FPS: {fps_display:.1f}, CPU Temp: {cpu_temp:.1f}°C")
+
+        # Show FPS & CPU temp text overlay
+        fig.suptitle(f"Real-Time FFT | FPS: {fps_display:.1f} | CPU Temp: {get_cpu_temp():.1f}°C",
+                     fontsize=12, color='darkgreen')
+
         plt.pause(0.001)
 
-        
+    except Exception as e:
+        print("Frame skipped:", e)
+        continue
