@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import psutil, time, os
-# (You can later add: from sklearn.cluster import KMeans or from sklearn.svm import OneClassSVM)
 
 # ----------------- Settings -----------------
 PORT = "/dev/ttyACM0"          # Change to your ESP32 port
@@ -49,7 +48,7 @@ def smooth(data, w=5):
     return np.convolve(data, np.ones(w)/w, mode='same')
 
 def find_main_freq(volt):
-    """Return main frequency, amplitude, harmonics, RMS, THD."""
+    """Return main frequency, amplitude, harmonics, RMS, THD, and second largest peak."""
     volt = volt - np.mean(volt)  # Remove DC
 
     fft_vals = np.fft.rfft(volt * np.hanning(N))
@@ -63,7 +62,7 @@ def find_main_freq(volt):
     mag_valid = mag[mask]
     freq_axis_valid = freq_axis[mask]
 
-    # Find main frequency
+    # --- Main frequency ---
     main_idx = np.argmax(mag_db_valid)
     main_freq = freq_axis_valid[main_idx]
     main_amp = mag_valid[main_idx]
@@ -74,7 +73,7 @@ def find_main_freq(volt):
         correction = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma)
         main_freq += correction * (FS / N)
 
-    # Find harmonics
+    # --- Harmonics ---
     harmonic_freqs = []
     harmonic_mags = []
     for h in [2, 3, 4]:
@@ -84,11 +83,24 @@ def find_main_freq(volt):
             harmonic_freqs.append(freq_axis_valid[idx])
             harmonic_mags.append(mag_valid[idx])
 
-    # RMS and THD
+    # --- RMS and THD ---
     rms = np.sqrt(np.mean(volt**2))
     thd = np.sqrt(np.sum(np.array(harmonic_mags)**2)) / main_amp if harmonic_mags else 0.0
 
-    return freq_axis, mag_db, main_freq, main_amp, harmonic_freqs, harmonic_mags, rms, thd
+    # --- Second largest peak (exclude main peak ± 5 bins) ---
+    exclude_bins = 5
+    mag_copy = mag_db_valid.copy()
+    start = max(0, main_idx - exclude_bins)
+    end = min(len(mag_copy), main_idx + exclude_bins + 1)
+    mag_copy[start:end] = -np.inf
+    second_idx = np.argmax(mag_copy)
+    second_freq = freq_axis_valid[second_idx]
+    second_amp = mag_valid[second_idx]
+
+    # --- SNR in dB ---
+    snr_db = 20 * np.log10(main_amp / (second_amp + 1e-12))  # Avoid div by zero
+
+    return freq_axis, mag_db, main_freq, main_amp, harmonic_freqs, harmonic_mags, rms, thd, second_freq, second_amp, snr_db
 
 # ----------------- Main Loop -----------------
 while True:
@@ -103,7 +115,8 @@ while True:
 
         # --- Frequency analysis ---
         (freq_axis, mag_db, main_freq, main_amp,
-         harmonic_freqs, harmonic_mags, rms, thd) = find_main_freq(volt)
+         harmonic_freqs, harmonic_mags, rms, thd,
+         second_freq, second_amp, snr_db) = find_main_freq(volt)
 
         # --- Time domain plot ---
         ax_time.cla()
@@ -116,18 +129,23 @@ while True:
         # --- FFT plot ---
         ax_fft.cla()
         ax_fft.plot(freq_axis, mag_db, color='purple')
+        # Main peak
         ax_fft.scatter(main_freq, 20*np.log10(main_amp), color='darkred', s=60, zorder=5)
         ax_fft.text(main_freq, 20*np.log10(main_amp)+3,
-                    f"{main_freq:.1f} Hz", color='darkred', fontsize=12)
-
+                    f"Main: {main_freq:.1f} Hz", color='darkred', fontsize=12)
+        # Harmonics
         for i, f in enumerate(harmonic_freqs):
             ax_fft.scatter(f, 20*np.log10(harmonic_mags[i]), color='darkslategray', s=40)
             ax_fft.text(f, 20*np.log10(harmonic_mags[i])+3,
                         f"{i+2}x", color='darkslategray', fontsize=10)
+        # Second largest peak
+        ax_fft.scatter(second_freq, 20*np.log10(second_amp), color='blue', s=60, zorder=6)
+        ax_fft.text(second_freq, 20*np.log10(second_amp)+3,
+                    f"2nd Peak: {second_freq:.1f} Hz", color='blue', fontsize=10)
 
         ax_fft.set_xlabel("Frequency [Hz]")
         ax_fft.set_ylabel("Magnitude [dB]")
-        ax_fft.set_title("FFT Spectrum with Harmonics")
+        ax_fft.set_title("FFT Spectrum with Harmonics & 2nd Peak")
         ax_fft.grid(True)
 
         # --- Spectrogram ---
@@ -141,6 +159,7 @@ while True:
         ax_spec.set_ylabel("Frequency [Hz]")
         ax_spec.set_title("Spectrogram (dB)")
         ax_spec.axhline(main_freq, color='darkgreen', lw=1.2, linestyle='--')
+        ax_spec.axhline(second_freq, color='blue', lw=1.2, linestyle='--')
 
         # --- Frequency Tracking ---
         freq_history.append(main_freq)
@@ -164,18 +183,19 @@ while True:
             frame_count = 0
             print(f"FPS: {fps_display:.1f}, CPU Temp: {cpu_temp:.1f}°C")
 
+        # --- Text Overlay ---
         fig.suptitle(
-            f"Real-Time FFT | FPS: {fps_display:.1f} | CPU: {get_cpu_temp():.1f}°C | "
-            f"Main: {main_freq:.1f} Hz | RMS: {rms:.3f} V | THD: {thd*100:.2f}%",
+            f"Real-Time FFT | FPS: {fps_display:.1f} | CPU: {get_cpu_temp():.1f}°C\n"
+            f"Main: {main_freq:.1f} Hz | RMS: {rms:.3f} V | THD: {thd*100:.2f}%\n"
+            f"2nd Peak: {second_freq:.1f} Hz | Amp Ratio: {second_amp/main_amp:.2f} | SNR: {snr_db:.2f} dB",
             fontsize=11, color='darkgreen'
         )
 
         plt.pause(0.001)
 
-        # --- Feature Vector for ML (ready for training) ---
-        feature_vector = np.array([main_freq, rms, thd])
-        # You can store or classify this later:
-        # ml_predict(feature_vector)  <-- placeholder for ML pattern detection
+        # --- Feature Vector for ML (optional) ---
+        feature_vector = np.array([main_freq, rms, thd, second_freq, second_amp, snr_db])
+        # ml_predict(feature_vector)  <-- placeholder
 
     except Exception as e:
         print("Frame skipped:", e)
