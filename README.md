@@ -154,5 +154,4 @@ Use it freely for research, educational, or prototyping purposes.
 
 👤 Author
 
-Developed by Ungsuchaval Samitchart
-Adapted & documented by GPT-5 for ESP32 real-time FFT applications.
+Developed by Ungsuchaval Samitchart.
