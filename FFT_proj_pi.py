@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import psutil, time, os
+from sklearn.preprocessing import StandardScaler
+# (You can later add: from sklearn.cluster import KMeans or from sklearn.svm import OneClassSVM)
 
 # ----------------- Settings -----------------
 PORT = "/dev/ttyACM0"          # Change to your ESP32 port
@@ -14,6 +16,7 @@ FS = 18860.0                   # Sampling frequency (Hz)
 HISTORY_LEN = 100
 TRACK_LEN = 200                # Frequency tracking length
 FRAME_SIZE = 2 + N*2           # HEADER + ADC data
+MIN_FREQ = 5.0                 # Ignore DC & very low frequencies
 
 # ----------------- Serial -----------------
 ser = serial.Serial(PORT, BAUD, timeout=0.05)
@@ -31,7 +34,7 @@ prev_time = time.time()
 frame_count = 0
 fps_display = 0
 
-# ----------------- Helper -----------------
+# ----------------- Helper Functions -----------------
 def get_cpu_temp():
     """Read CPU temperature (Linux or Raspberry Pi)."""
     try:
@@ -46,6 +49,48 @@ def smooth(data, w=5):
         return data
     return np.convolve(data, np.ones(w)/w, mode='same')
 
+def find_main_freq(volt):
+    """Return main frequency, amplitude, harmonics, RMS, THD."""
+    volt = volt - np.mean(volt)  # Remove DC
+
+    fft_vals = np.fft.rfft(volt * np.hanning(N))
+    mag = np.abs(fft_vals) * 2 / N
+    mag_db = 20 * np.log10(mag + 1e-12)
+    freq_axis = np.fft.rfftfreq(N, 1/FS)
+
+    # Ignore DC and low frequencies
+    mask = freq_axis > MIN_FREQ
+    mag_db_valid = mag_db[mask]
+    mag_valid = mag[mask]
+    freq_axis_valid = freq_axis[mask]
+
+    # Find main frequency
+    main_idx = np.argmax(mag_db_valid)
+    main_freq = freq_axis_valid[main_idx]
+    main_amp = mag_valid[main_idx]
+
+    # Parabolic interpolation for precision
+    if 1 < main_idx < len(mag_valid) - 1:
+        alpha, beta, gamma = mag_db_valid[main_idx-1:main_idx+2]
+        correction = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma)
+        main_freq += correction * (FS / N)
+
+    # Find harmonics
+    harmonic_freqs = []
+    harmonic_mags = []
+    for h in [2, 3, 4]:
+        target = h * main_freq
+        if target < FS/2:
+            idx = np.argmin(np.abs(freq_axis_valid - target))
+            harmonic_freqs.append(freq_axis_valid[idx])
+            harmonic_mags.append(mag_valid[idx])
+
+    # RMS and THD
+    rms = np.sqrt(np.mean(volt**2))
+    thd = np.sqrt(np.sum(np.array(harmonic_mags)**2)) / main_amp if harmonic_mags else 0.0
+
+    return freq_axis, mag_db, main_freq, main_amp, harmonic_freqs, harmonic_mags, rms, thd
+
 # ----------------- Main Loop -----------------
 while True:
     try:
@@ -53,11 +98,15 @@ while True:
         if len(frame) != FRAME_SIZE or frame[0:2] != HEADER:
             continue
 
-        # --- Convert ADC to voltage ---
+        # Convert ADC to voltage
         adc_vals = np.frombuffer(frame[2:], dtype=np.uint16)
         volt = adc_vals * VREF / 4095.0
 
-        # --- Time-domain plot ---
+        # --- Frequency analysis ---
+        (freq_axis, mag_db, main_freq, main_amp,
+         harmonic_freqs, harmonic_mags, rms, thd) = find_main_freq(volt)
+
+        # --- Time domain plot ---
         ax_time.cla()
         ax_time.plot(np.arange(N)/FS, volt, color='black')
         ax_time.set_xlabel("Time [s]")
@@ -65,44 +114,17 @@ while True:
         ax_time.set_title("Time Domain Signal")
         ax_time.grid(True)
 
-        # --- FFT ---
-        fft_vals = np.fft.rfft(volt * np.hanning(N))
-        mag = np.abs(fft_vals) * 2 / N
-        mag_db = 20 * np.log10(mag + 1e-12)
-        freq_axis = np.fft.rfftfreq(N, 1/FS)
-
-        # --- Find main frequency & harmonics ---
-        main_idx = np.argmax(mag_db)
-        main_freq = freq_axis[main_idx]
-        main_amp = mag[main_idx]
-
-        harmonic_freqs = []
-        harmonic_mags = []
-        for h in [2, 3]:
-            target = h * main_freq
-            if target < FS/2:
-                idx = np.argmin(np.abs(freq_axis - target))
-                harmonic_freqs.append(freq_axis[idx])
-                harmonic_mags.append(mag[idx])
-
-        # --- Compute RMS and THD ---
-        rms = np.sqrt(np.mean(volt**2))
-        if harmonic_mags:
-            thd = np.sqrt(np.sum(np.array(harmonic_mags)**2)) / main_amp
-        else:
-            thd = 0.0
-
         # --- FFT plot ---
         ax_fft.cla()
         ax_fft.plot(freq_axis, mag_db, color='purple')
-        ax_fft.scatter(main_freq, 20*np.log10(main_amp), color='green', s=60)
+        ax_fft.scatter(main_freq, 20*np.log10(main_amp), color='lime', s=60, zorder=5)
         ax_fft.text(main_freq, 20*np.log10(main_amp)+3,
-                    f"Main: {main_freq:.1f} Hz", color='green', fontsize=9)
+                    f"{main_freq:.1f} Hz", color='lime', fontsize=9)
 
         for i, f in enumerate(harmonic_freqs):
-            ax_fft.scatter(f, 20*np.log10(harmonic_mags[i]), color='orange', s=60)
+            ax_fft.scatter(f, 20*np.log10(harmonic_mags[i]), color='orange', s=40)
             ax_fft.text(f, 20*np.log10(harmonic_mags[i])+3,
-                        f"{i+2}nd: {f:.1f} Hz", color='orange', fontsize=8)
+                        f"{i+2}x", color='orange', fontsize=8)
 
         ax_fft.set_xlabel("Frequency [Hz]")
         ax_fft.set_ylabel("Magnitude [dB]")
@@ -112,21 +134,18 @@ while True:
         # --- Spectrogram ---
         spec_history.append(mag_db[:N//2])
         spec_array = np.array(spec_history).T
-
         ax_spec.cla()
-        im = ax_spec.imshow(spec_array, aspect='auto', origin='lower',
-                            extent=[0, HISTORY_LEN, 0, FS/2],
-                            cmap='inferno', vmin=-100, vmax=0)
+        ax_spec.imshow(spec_array, aspect='auto', origin='lower',
+                       extent=[0, HISTORY_LEN, 0, FS/2],
+                       cmap='inferno', vmin=-100, vmax=0)
         ax_spec.set_xlabel("Frame Index")
         ax_spec.set_ylabel("Frequency [Hz]")
         ax_spec.set_title("Spectrogram (dB)")
-        ax_spec.grid(False)
-        ax_spec.axhline(main_freq, color='green', lw=1.5, linestyle='--')
+        ax_spec.axhline(main_freq, color='green', lw=1.2, linestyle='--')
 
-        # --- Frequency tracking ---
+        # --- Frequency Tracking ---
         freq_history.append(main_freq)
         time_history.append(time_history[-1] + 1)
-
         ax_track.cla()
         ax_track.plot(list(time_history), smooth(freq_history, 5),
                       color='teal', linewidth=1.8)
@@ -137,7 +156,7 @@ while True:
         ax_track.set_xlim(time_history[0], time_history[-1])
         ax_track.set_ylim(0, FS/2)
 
-        # --- FPS & CPU Temp ---
+        # --- Performance & Overlay ---
         frame_count += 1
         if time.time() - prev_time >= 1.0:
             fps_display = frame_count / (time.time() - prev_time)
@@ -146,7 +165,6 @@ while True:
             frame_count = 0
             print(f"FPS: {fps_display:.1f}, CPU Temp: {cpu_temp:.1f}°C")
 
-        # --- Overlay info ---
         fig.suptitle(
             f"Real-Time FFT | FPS: {fps_display:.1f} | CPU: {get_cpu_temp():.1f}°C | "
             f"Main: {main_freq:.1f} Hz | RMS: {rms:.3f} V | THD: {thd*100:.2f}%",
@@ -154,6 +172,11 @@ while True:
         )
 
         plt.pause(0.001)
+
+        # --- Feature Vector for ML (ready for training) ---
+        feature_vector = np.array([main_freq, rms, thd])
+        # You can store or classify this later:
+        # ml_predict(feature_vector)  <-- placeholder for ML pattern detection
 
     except Exception as e:
         print("Frame skipped:", e)
