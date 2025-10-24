@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import psutil, time, os
-from sklearn.preprocessing import StandardScaler
 # (You can later add: from sklearn.cluster import KMeans or from sklearn.svm import OneClassSVM)
 
 # ----------------- Settings -----------------
@@ -117,14 +116,14 @@ while True:
         # --- FFT plot ---
         ax_fft.cla()
         ax_fft.plot(freq_axis, mag_db, color='purple')
-        ax_fft.scatter(main_freq, 20*np.log10(main_amp), color='lime', s=60, zorder=5)
+        ax_fft.scatter(main_freq, 20*np.log10(main_amp), color='darkred', s=60, zorder=5)
         ax_fft.text(main_freq, 20*np.log10(main_amp)+3,
-                    f"{main_freq:.1f} Hz", color='lime', fontsize=9)
+                    f"{main_freq:.1f} Hz", color='darkred', fontsize=12)
 
         for i, f in enumerate(harmonic_freqs):
-            ax_fft.scatter(f, 20*np.log10(harmonic_mags[i]), color='orange', s=40)
+            ax_fft.scatter(f, 20*np.log10(harmonic_mags[i]), color='darkslategray', s=40)
             ax_fft.text(f, 20*np.log10(harmonic_mags[i])+3,
-                        f"{i+2}x", color='orange', fontsize=8)
+                        f"{i+2}x", color='darkslategray', fontsize=10)
 
         ax_fft.set_xlabel("Frequency [Hz]")
         ax_fft.set_ylabel("Magnitude [dB]")
@@ -141,7 +140,7 @@ while True:
         ax_spec.set_xlabel("Frame Index")
         ax_spec.set_ylabel("Frequency [Hz]")
         ax_spec.set_title("Spectrogram (dB)")
-        ax_spec.axhline(main_freq, color='green', lw=1.2, linestyle='--')
+        ax_spec.axhline(main_freq, color='darkgreen', lw=1.2, linestyle='--')
 
         # --- Frequency Tracking ---
         freq_history.append(main_freq)
